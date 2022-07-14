@@ -24,6 +24,7 @@ import { TYPE } from './packet';
 import PreloginPayload from './prelogin-payload';
 import Login7Payload from './login7-payload';
 import NTLMResponsePayload from './ntlm-payload';
+import IntegratedResponsePayload from './integrated-payload';
 import Request from './request';
 import RpcRequestPayload from './rpcrequest-payload';
 import SqlBatchPayload from './sqlbatch-payload';
@@ -37,6 +38,7 @@ import { versions } from './tds-versions';
 import Message from './message';
 import { Metadata } from './metadata-parser';
 import { createNTLMRequest } from './ntlm';
+import { createIntegratedRequest } from './integrated';
 import { ColumnEncryptionAzureKeyVaultProvider } from './always-encrypted/keystore-provider-azure-key-vault';
 
 import { AbortController, AbortSignal } from 'node-abort-controller';
@@ -48,6 +50,11 @@ import AggregateError from 'es-aggregate-error';
 import { version } from '../package.json';
 import { URL } from 'url';
 import { AttentionTokenHandler, InitialSqlTokenHandler, Login7TokenHandler, RequestTokenHandler, TokenHandler } from './token/handler';
+
+const SspiClientApi = require('@sregger/sspi-client').SspiClientApi;
+const Fqdn = require('@sregger/sspi-client').Fqdn;
+const MakeSpn = require('@sregger/sspi-client').MakeSpn;
+
 
 type BeginTransactionCallback =
   /**
@@ -310,6 +317,17 @@ interface NtlmAuthentication {
   };
 }
 
+interface IntegratedAuthentication {
+  type: 'integrated';
+  options: {
+    /**
+     *
+     * This is necessary for forming a connection using ntlm type
+     */
+    domain: string;
+  };
+}
+
 interface DefaultAuthentication {
   type: 'default';
   options: {
@@ -330,7 +348,7 @@ interface ErrorWithCode extends Error {
 
 interface InternalConnectionConfig {
   server: string;
-  authentication: DefaultAuthentication | NtlmAuthentication | AzureActiveDirectoryPasswordAuthentication | AzureActiveDirectoryMsiAppServiceAuthentication | AzureActiveDirectoryMsiVmAuthentication | AzureActiveDirectoryAccessTokenAuthentication | AzureActiveDirectoryServicePrincipalSecret | AzureActiveDirectoryDefaultAuthentication;
+  authentication: DefaultAuthentication | NtlmAuthentication | IntegratedAuthentication | AzureActiveDirectoryPasswordAuthentication | AzureActiveDirectoryMsiAppServiceAuthentication | AzureActiveDirectoryMsiVmAuthentication | AzureActiveDirectoryAccessTokenAuthentication | AzureActiveDirectoryServicePrincipalSecret | AzureActiveDirectoryDefaultAuthentication;
   options: InternalConnectionOptions;
 }
 
@@ -414,6 +432,7 @@ interface State {
 
 type Authentication = DefaultAuthentication |
   NtlmAuthentication |
+  IntegratedAuthentication |
   AzureActiveDirectoryPasswordAuthentication |
   AzureActiveDirectoryMsiAppServiceAuthentication |
   AzureActiveDirectoryMsiVmAuthentication |
@@ -479,6 +498,7 @@ interface AuthenticationOptions {
    *
    * * `default`: [[DefaultAuthentication.options]]
    * * `ntlm` :[[NtlmAuthentication]]
+   * * `integrated` :[[IntegratedAuthentication]]
    * * `azure-active-directory-password` : [[AzureActiveDirectoryPasswordAuthentication.options]]
    * * `azure-active-directory-access-token` : [[AzureActiveDirectoryAccessTokenAuthentication.options]]
    * * `azure-active-directory-msi-vm` : [[AzureActiveDirectoryMsiVmAuthentication.options]]
@@ -937,6 +957,12 @@ class Connection extends EventEmitter {
   /**
    * @private
    */
+
+  sspiClient: undefined | any;
+  /**
+   * @private
+   */
+
   declare STATE: {
     INITIALIZED: State;
     CONNECTING: State;
@@ -946,6 +972,7 @@ class Connection extends EventEmitter {
     SENT_TLSSSLNEGOTIATION: State;
     SENT_LOGIN7_WITH_STANDARD_LOGIN: State;
     SENT_LOGIN7_WITH_NTLM: State;
+    SENT_LOGIN7_WITH_INTEGRATED: State;
     SENT_LOGIN7_WITH_FEDAUTH: State;
     LOGGED_IN_SENDING_INITIAL_SQL: State;
     LOGGED_IN: State;
@@ -1063,7 +1090,7 @@ class Connection extends EventEmitter {
         throw new TypeError('The "config.authentication.type" property must be of type string.');
       }
 
-      if (type !== 'default' && type !== 'ntlm' && type !== 'azure-active-directory-password' && type !== 'azure-active-directory-access-token' && type !== 'azure-active-directory-msi-vm' && type !== 'azure-active-directory-msi-app-service' && type !== 'azure-active-directory-service-principal-secret' && type !== 'azure-active-directory-default') {
+      if (type !== 'default' && type !== 'ntlm' && type !== 'integrated' && type !== 'azure-active-directory-password' && type !== 'azure-active-directory-access-token' && type !== 'azure-active-directory-msi-vm' && type !== 'azure-active-directory-msi-app-service' && type !== 'azure-active-directory-service-principal-secret' && type !== 'azure-active-directory-default' ) {
         throw new TypeError('The "type" property must one of "default", "ntlm", "azure-active-directory-password", "azure-active-directory-access-token", "azure-active-directory-default", "azure-active-directory-msi-vm" or "azure-active-directory-msi-app-service" or "azure-active-directory-service-principal-secret".');
       }
 
@@ -1071,7 +1098,14 @@ class Connection extends EventEmitter {
         throw new TypeError('The "config.authentication.options" property must be of type object.');
       }
 
-      if (type === 'ntlm') {
+      if (type === 'integrated') {
+        authentication = {
+          type: 'integrated',
+          options: {
+            domain: options.domain && options.domain.toUpperCase()
+          }
+        };
+      } else if (type === 'ntlm') {
         if (typeof options.domain !== 'string') {
           throw new TypeError('The "config.authentication.options.domain" property must be of type string.');
         }
@@ -1228,10 +1262,10 @@ class Connection extends EventEmitter {
         datefirst: DEFAULT_DATEFIRST,
         dateFormat: DEFAULT_DATEFORMAT,
         debug: {
-          data: false,
-          packet: false,
-          payload: false,
-          token: false
+          data: true, //TODO: return this to false
+          packet: true, //TODO: return this to false
+          payload: true, //TODO: return this to false
+          token: true //TODO: return this to false
         },
         enableAnsiNull: true,
         enableAnsiNullDefault: true,
@@ -2255,7 +2289,7 @@ class Connection extends EventEmitter {
   /**
    * @private
    */
-  sendLogin7Packet() {
+  async sendLogin7Packet() {
     const payload = new Login7Payload({
       tdsVersion: versions[this.config.options.tdsVersion],
       packetSize: this.config.options.packetSize,
@@ -2297,6 +2331,28 @@ class Connection extends EventEmitter {
 
       case 'ntlm':
         payload.sspi = createNTLMRequest({ domain: authentication.options.domain });
+        // console.log("payload =>", payload);
+        break;
+
+      case 'integrated':
+        let fqdn = await new Promise((resolve, reject) => {
+          Fqdn.getFqdn(this.routingData ? this.routingData.server : this.config.server, (err:any, fqdn:any) => {
+            if (err) {
+              console.log(err);
+              reject(err);
+            } else {
+              console.log('fqdn', fqdn);
+              resolve(fqdn);
+            }
+          });
+        });
+        console.log('in integrated auth', fqdn)
+        const spn = MakeSpn.makeSpn('MSSQLSvc', fqdn, this.config.options.port);
+        console.log('SPN: ', spn);
+
+        this.sspiClient = new SspiClientApi.SspiClient(spn);
+        payload.sspi = await createIntegratedRequest(this.sspiClient);
+        // console.log("payload =>", payload);
         break;
 
       default:
@@ -3193,6 +3249,9 @@ Connection.prototype.STATE = {
           case 'ntlm':
             this.transitionTo(this.STATE.SENT_LOGIN7_WITH_NTLM);
             break;
+          case 'integrated':
+            this.transitionTo(this.STATE.SENT_LOGIN7_WITH_INTEGRATED)
+            break;
           default:
             this.transitionTo(this.STATE.SENT_LOGIN7_WITH_STANDARD_LOGIN);
             break;
@@ -3330,6 +3389,7 @@ Connection.prototype.STATE = {
           await once(tokenStreamParser, 'end');
 
           if (handler.loginAckReceived) {
+            console.log('login ack');
             if (handler.routingData) {
               this.routingData = handler.routingData;
               return this.transitionTo(this.STATE.REROUTING);
@@ -3346,11 +3406,81 @@ Connection.prototype.STATE = {
               ntlmpacket: this.ntlmpacket
             });
 
+            console.log('payload data ->', payload.data);
             this.messageIo.sendMessage(TYPE.NTLMAUTH_PKT, payload.data);
             this.debug.payload(function() {
               return payload.toString('  ');
             });
 
+            this.ntlmpacket = undefined;
+          } else if (this.loginError) {
+            if (isTransientError(this.loginError)) {
+              this.debug.log('Initiating retry on transient error');
+              return this.transitionTo(this.STATE.TRANSIENT_FAILURE_RETRY);
+            } else {
+              this.emit('connect', this.loginError);
+              return this.transitionTo(this.STATE.FINAL);
+            }
+          } else {
+            this.emit('connect', new ConnectionError('Login failed.', 'ELOGIN'));
+            return this.transitionTo(this.STATE.FINAL);
+          }
+        }
+
+      })().catch((err) => {
+        process.nextTick(() => {
+          throw err;
+        });
+      });
+    },
+    events: {
+      socketError: function() {
+        this.transitionTo(this.STATE.FINAL);
+      },
+      connectTimeout: function() {
+        this.transitionTo(this.STATE.FINAL);
+      }
+    }
+  },
+  SENT_LOGIN7_WITH_INTEGRATED: {
+    name: 'SentLogin7WithIntegratedLogin',
+    enter: function() {
+      (async () => {
+        while (true) {
+          let message;
+          try {
+            message = await this.messageIo.readMessage();
+          } catch (err: any) {
+            return this.socketError(err);
+          }
+
+          // console.log(message);
+
+          const handler = new Login7TokenHandler(this);
+          const tokenStreamParser = this.createTokenStreamParser(message, handler);
+
+          await once(tokenStreamParser, 'end');
+
+          if (handler.loginAckReceived) {
+            console.log('login ack', handler, handler.routingData);
+            if (handler.routingData) {
+              this.routingData = handler.routingData;
+              return this.transitionTo(this.STATE.REROUTING);
+            } else {
+              return this.transitionTo(this.STATE.LOGGED_IN_SENDING_INITIAL_SQL);
+            }
+          } else if (this.ntlmpacket) {
+            // console.log("ntlmpacket", this.ntlmpacketBuffer);
+            const authentication = this.config.authentication as NtlmAuthentication;
+
+            const payload = new IntegratedResponsePayload(this.config.server);
+            const clientResponse = await payload.createResponse(this.ntlmpacketBuffer, this.sspiClient);
+            console.log('client response', clientResponse);
+
+            this.messageIo.sendMessage(TYPE.NTLMAUTH_PKT, clientResponse);
+            this.debug.payload(function() {
+              return payload.toString('  ');
+            });
             this.ntlmpacket = undefined;
           } else if (this.loginError) {
             if (isTransientError(this.loginError)) {

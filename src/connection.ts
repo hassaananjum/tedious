@@ -50,6 +50,7 @@ import AggregateError from 'es-aggregate-error';
 import { version } from '../package.json';
 import { URL } from 'url';
 import { AttentionTokenHandler, InitialSqlTokenHandler, Login7TokenHandler, RequestTokenHandler, TokenHandler } from './token/handler';
+import { parseChallenge } from './integrated';
 
 const SspiClientApi = require('@sregger/sspi-client').SspiClientApi;
 const Fqdn = require('@sregger/sspi-client').Fqdn;
@@ -2331,28 +2332,12 @@ class Connection extends EventEmitter {
 
       case 'ntlm':
         payload.sspi = createNTLMRequest({ domain: authentication.options.domain });
-        // console.log("payload =>", payload);
         break;
 
       case 'integrated':
-        let fqdn = await new Promise((resolve, reject) => {
-          Fqdn.getFqdn(this.routingData ? this.routingData.server : this.config.server, (err:any, fqdn:any) => {
-            if (err) {
-              console.log(err);
-              reject(err);
-            } else {
-              console.log('fqdn', fqdn);
-              resolve(fqdn);
-            }
-          });
-        });
-        console.log('in integrated auth', fqdn)
-        const spn = MakeSpn.makeSpn('MSSQLSvc', fqdn, this.config.options.port);
-        console.log('SPN: ', spn);
-
+        const spn = MakeSpn.makeSpn('MSSQLSvc', authentication.options.domain, this.config.options.port);
         this.sspiClient = new SspiClientApi.SspiClient(spn);
         payload.sspi = await createIntegratedRequest(this.sspiClient);
-        // console.log("payload =>", payload);
         break;
 
       default:
@@ -3234,7 +3219,7 @@ Connection.prototype.STATE = {
           }
         }
 
-        this.sendLogin7Packet();
+        await this.sendLogin7Packet();
 
         const { authentication } = this.config;
 
@@ -3389,30 +3374,28 @@ Connection.prototype.STATE = {
           await once(tokenStreamParser, 'end');
 
           if (handler.loginAckReceived) {
-            console.log('login ack');
             if (handler.routingData) {
               this.routingData = handler.routingData;
               return this.transitionTo(this.STATE.REROUTING);
             } else {
               return this.transitionTo(this.STATE.LOGGED_IN_SENDING_INITIAL_SQL);
             }
-          } else if (this.ntlmpacket) {
+          } else if (handler.sspiToken) {
             const authentication = this.config.authentication as NtlmAuthentication;
 
             const payload = new NTLMResponsePayload({
               domain: authentication.options.domain,
               userName: authentication.options.userName,
               password: authentication.options.password,
-              ntlmpacket: this.ntlmpacket
+              ntlmpacket: parseChallenge(handler.sspiToken.data)
             });
 
-            console.log('payload data ->', payload.data);
             this.messageIo.sendMessage(TYPE.NTLMAUTH_PKT, payload.data);
             this.debug.payload(function() {
               return payload.toString('  ');
             });
 
-            this.ntlmpacket = undefined;
+            // this.ntlmpacket = undefined;
           } else if (this.loginError) {
             if (isTransientError(this.loginError)) {
               this.debug.log('Initiating retry on transient error');
@@ -3454,34 +3437,33 @@ Connection.prototype.STATE = {
             return this.socketError(err);
           }
 
-          // console.log(message);
-
           const handler = new Login7TokenHandler(this);
           const tokenStreamParser = this.createTokenStreamParser(message, handler);
 
           await once(tokenStreamParser, 'end');
 
           if (handler.loginAckReceived) {
-            console.log('login ack', handler, handler.routingData);
             if (handler.routingData) {
               this.routingData = handler.routingData;
               return this.transitionTo(this.STATE.REROUTING);
             } else {
               return this.transitionTo(this.STATE.LOGGED_IN_SENDING_INITIAL_SQL);
             }
-          } else if (this.ntlmpacket) {
-            // console.log("ntlmpacket", this.ntlmpacketBuffer);
+          } else if (handler.sspiToken) {
             const authentication = this.config.authentication as NtlmAuthentication;
 
             const payload = new IntegratedResponsePayload(this.config.server);
-            const clientResponse = await payload.createResponse(this.ntlmpacketBuffer, this.sspiClient);
-            console.log('client response', clientResponse);
+            const clientResponse = await payload.createResponse(handler.sspiToken.data, this.sspiClient);
+
+            if (!clientResponse.length) {
+              continue;
+            }
 
             this.messageIo.sendMessage(TYPE.NTLMAUTH_PKT, clientResponse);
             this.debug.payload(function() {
               return payload.toString('  ');
             });
-            this.ntlmpacket = undefined;
+            // this.ntlmpacket = undefined;
           } else if (this.loginError) {
             if (isTransientError(this.loginError)) {
               this.debug.log('Initiating retry on transient error');

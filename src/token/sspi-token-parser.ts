@@ -19,7 +19,9 @@ interface Data {
   target: Buffer;
 }
 
-function parseChallenge(buffer: Buffer) {
+export function parseChallenge(buffer: Buffer) {
+
+  console.log('parsing challenge');
   const challenge: Partial<Data> = {};
 
   challenge.magic = buffer.slice(0, 8).toString('utf8');
@@ -42,7 +44,7 @@ function parseChallenge(buffer: Buffer) {
 
 function sspiParser(parser: Parser, _options: ParserOptions, callback: (token: SSPIToken) => void) {
   parser.readUsVarByte((buffer) => {
-    callback(new SSPIToken(parseChallenge(buffer), buffer));
+    callback(new SSPIToken(buffer));
   });
 }
 

@@ -249,7 +249,7 @@ export class Login7TokenHandler extends TokenHandler {
 
   fedAuthInfoToken: FedAuthInfoToken | undefined;
   routingData: { server: string, port: number } | undefined;
-
+  sspiToken: SSPIToken | undefined;
   loginAckReceived = false;
 
   constructor(connection: Connection) {
@@ -264,7 +264,6 @@ export class Login7TokenHandler extends TokenHandler {
 
   onErrorMessage(token: ErrorMessageToken) {
     this.connection.emit('errorMessage', token);
-
     const error = new ConnectionError(token.message, 'ELOGIN');
 
     const isLoginErrorTransient = this.connection.transientErrorLookup.isTransientError(token.number);
@@ -276,10 +275,11 @@ export class Login7TokenHandler extends TokenHandler {
   }
 
   onSSPI(token: SSPIToken) {
-    if (token.ntlmpacket) {
-      this.connection.ntlmpacket = token.ntlmpacket;
-      this.connection.ntlmpacketBuffer = token.ntlmpacketBuffer;
-    }
+    // if (token.ntlmpacket) {
+    //   this.connection.ntlmpacket = token.ntlmpacket;
+    //   this.connection.ntlmpacketBuffer = token.ntlmpacketBuffer;
+    // }
+    this.sspiToken = token;
   }
 
   onDatabaseChange(token: DatabaseEnvChangeToken) {

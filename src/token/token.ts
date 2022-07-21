@@ -486,13 +486,15 @@ export class SSPIToken extends Token {
   declare name: 'SSPICHALLENGE';
   declare handlerName: 'onSSPI';
 
-  ntlmpacket: any;
-  ntlmpacketBuffer: Buffer;
+  // ntlmpacket: any;
+  // ntlmpacketBuffer: Buffer;
+  data: Buffer;
 
-  constructor(ntlmpacket: any, ntlmpacketBuffer: Buffer) {
+  constructor(data: Buffer) {
     super('SSPICHALLENGE', 'onSSPI');
 
-    this.ntlmpacket = ntlmpacket;
-    this.ntlmpacketBuffer = ntlmpacketBuffer;
+    // this.ntlmpacket = ntlmpacket;
+    // this.ntlmpacketBuffer = ntlmpacketBuffer;
+    this.data = data;
   }
 }

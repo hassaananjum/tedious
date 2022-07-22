@@ -50,11 +50,8 @@ import AggregateError from 'es-aggregate-error';
 import { version } from '../package.json';
 import { URL } from 'url';
 import { AttentionTokenHandler, InitialSqlTokenHandler, Login7TokenHandler, RequestTokenHandler, TokenHandler } from './token/handler';
-import { parseChallenge } from './integrated';
-
-const SspiClientApi = require('@sregger/sspi-client').SspiClientApi;
-const Fqdn = require('@sregger/sspi-client').Fqdn;
-const MakeSpn = require('@sregger/sspi-client').MakeSpn;
+import { parseChallenge } from './token/sspi-token-parser';
+import { SspiClientApi, MakeSpn } from '@sregger/sspi-client';
 
 
 type BeginTransactionCallback =
@@ -1091,7 +1088,7 @@ class Connection extends EventEmitter {
         throw new TypeError('The "config.authentication.type" property must be of type string.');
       }
 
-      if (type !== 'default' && type !== 'ntlm' && type !== 'integrated' && type !== 'azure-active-directory-password' && type !== 'azure-active-directory-access-token' && type !== 'azure-active-directory-msi-vm' && type !== 'azure-active-directory-msi-app-service' && type !== 'azure-active-directory-service-principal-secret' && type !== 'azure-active-directory-default' ) {
+      if (type !== 'default' && type !== 'ntlm' && type !== 'integrated' && type !== 'azure-active-directory-password' && type !== 'azure-active-directory-access-token' && type !== 'azure-active-directory-msi-vm' && type !== 'azure-active-directory-msi-app-service' && type !== 'azure-active-directory-service-principal-secret' && type !== 'azure-active-directory-default') {
         throw new TypeError('The "type" property must one of "default", "ntlm", "azure-active-directory-password", "azure-active-directory-access-token", "azure-active-directory-default", "azure-active-directory-msi-vm" or "azure-active-directory-msi-app-service" or "azure-active-directory-service-principal-secret".');
       }
 
@@ -1263,10 +1260,10 @@ class Connection extends EventEmitter {
         datefirst: DEFAULT_DATEFIRST,
         dateFormat: DEFAULT_DATEFORMAT,
         debug: {
-          data: true, //TODO: return this to false
-          packet: true, //TODO: return this to false
-          payload: true, //TODO: return this to false
-          token: true //TODO: return this to false
+          data: false,
+          packet: false,
+          payload: false,
+          token: false
         },
         enableAnsiNull: true,
         enableAnsiNullDefault: true,
@@ -3235,7 +3232,7 @@ Connection.prototype.STATE = {
             this.transitionTo(this.STATE.SENT_LOGIN7_WITH_NTLM);
             break;
           case 'integrated':
-            this.transitionTo(this.STATE.SENT_LOGIN7_WITH_INTEGRATED)
+            this.transitionTo(this.STATE.SENT_LOGIN7_WITH_INTEGRATED);
             break;
           default:
             this.transitionTo(this.STATE.SENT_LOGIN7_WITH_STANDARD_LOGIN);
@@ -3450,8 +3447,6 @@ Connection.prototype.STATE = {
               return this.transitionTo(this.STATE.LOGGED_IN_SENDING_INITIAL_SQL);
             }
           } else if (handler.sspiToken) {
-            const authentication = this.config.authentication as NtlmAuthentication;
-
             const payload = new IntegratedResponsePayload(this.config.server);
             const clientResponse = await payload.createResponse(handler.sspiToken.data, this.sspiClient);
 

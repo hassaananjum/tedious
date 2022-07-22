@@ -1,15 +1,14 @@
-
-export async function createIntegratedRequest(sspiClient:any){
-    const clientResponse:Buffer = await new Promise((resolve, reject) => {
-        sspiClient.getNextBlob(null, 0, 0, (clientResponse:Buffer, isDone:boolean, errorCode:any, errorString:string) => {
-            if (errorCode) {
-                reject(errorCode);
-            } else {
-                resolve(clientResponse)
-            }
-        });
+export async function createIntegratedRequest(sspiClient: any) {
+  const clientResponse: Buffer = await new Promise((resolve, reject) => {
+    sspiClient.getNextBlob(null, 0, 0, (clientResponse: Buffer, isDone: boolean, errorCode: any, errorString: string) => {
+      if (errorCode) {
+        reject(errorCode);
+      } else {
+        resolve(clientResponse);
+      }
     });
-    return clientResponse;
+  });
+  return clientResponse;
 }
 
 interface Data {
